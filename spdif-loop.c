@@ -1,27 +1,18 @@
 #define _GNU_SOURCE
 
-#include <math.h>
 #include <stdio.h>
-#include <unistd.h>
-#include <err.h>
+#include <signal.h>
 #include <getopt.h>
-#include <sys/time.h>
 
-#include <libavformat/avformat.h>
-#include <libavcodec/avcodec.h>
 #include <libavdevice/avdevice.h>
-#include <libavformat/avformat.h>
 #include <libswresample/swresample.h>
-#include <libswresample/swresample_internal.h>
-#include <libavutil/avassert.h>
+#include <libswresample/swresample_internal.h> //need to remove this
 
 #define SPDIF_SYNCWORD 0x72F81F4E
+#define SPDIF_IN_CODEC_PROBESIZE 4096
 
-#define ALSA_IO_BUFFER_SIZE 512*3
-#define FRAME_SIZE 1536
+#define ALSA_IO_BUFFER_SIZE 512
 #define PCM_DETECT_DELAY_SIZE 512*1024
-
-static int verbose = 1;
 
 typedef struct looper_data_s {
 	AVPacket in_pkt;
@@ -41,9 +32,13 @@ typedef struct looper_data_s {
 	AVStream *out_stream;
 } looper_data_t;
 
-int init_input(looper_data_t *ld, const char *in_dev_name);
-int init_output(looper_data_t *ld, const char *out_dev_name, int format, int sample_rate, int channels);
-int init_spdif(looper_data_t *ld);
+static int verbose = 0;
+static looper_data_t ld = {0};
+
+static void usage(char *self){
+	fprintf(stderr, "Usage: %s [-v verbose] -i <input> -o <output>\n", self);
+	exit(-1);
+}
 
 static int cleanup_spdif(looper_data_t *ld, int err){
 	avcodec_free_context(&ld->in_codec_ctx);
@@ -60,7 +55,8 @@ static int cleanup_spdif(looper_data_t *ld, int err){
 }
 
 static int cleanup(looper_data_t *ld, int err){
-	cleanup_spdif(ld, 0);
+	swr_free(&ld->swr_ctx);
+	cleanup_spdif(ld, err);
 	if(ld->out_ctx){
 		avformat_free_context(ld->out_ctx);
 		ld->out_ctx = NULL;
@@ -68,9 +64,15 @@ static int cleanup(looper_data_t *ld, int err){
 	avformat_close_input(&ld->in_alsa_ctx);
 	return err;
 }
-static void usage(void){
-	fprintf(stderr, "usage:\n  spdif-loop [-t | -i <hw:alsa-input-dev>] -d <alsa|pulse> -o <output-dev>\n");
-	exit(1);
+
+static void die(int nsig){
+	fprintf(stderr, "terminate, start cleanup");
+	exit(0);
+}
+
+static void sf(int nsig){
+	fprintf(stderr, "SEGMENTATION FAULT");
+	exit(-1);
 }
 
 static int decode_audio_frame(looper_data_t *ld, AVFrame **frame){
@@ -83,7 +85,7 @@ static int decode_audio_frame(looper_data_t *ld, AVFrame **frame){
 
 	if(!(*frame = av_frame_alloc())){
 		err = AVERROR(ENOMEM);
-		av_log(ld->in_codec_ctx, AV_LOG_ERROR, "cannot allocate frame: %s\n", av_err2str(err));
+		av_log(ld->in_codec_ctx, AV_LOG_ERROR, "cannot allocate frame\n");
 		goto cleanup;
 	}
 
@@ -102,10 +104,6 @@ static int decode_audio_frame(looper_data_t *ld, AVFrame **frame){
 		goto cleanup;
 	}
 
-	if(ld->in_pcm_mode >= PCM_DETECT_DELAY_SIZE){
-//			avformat_flush(ld->out_ctx);
-//printf("DECODER: avformat_flush: %u\n", ld->in_pcm_mode);
-}
 	ld->in_pcm_mode = 0;
 
 cleanup:
@@ -113,7 +111,7 @@ cleanup:
 	return err;
 }
 
-static int convert_and_write(looper_data_t *ld, int in_sample_rate, int64_t in_ch_layout, int in_sample_fmt, const uint8_t **in_samples, int in_nb_samples,int ttt){
+static int convert_and_write(looper_data_t *ld, int in_sample_rate, int64_t in_ch_layout, int in_sample_fmt, const uint8_t **in_samples, int in_nb_samples){
 	AVPacket pkt;
 	uint8_t **out_samples = NULL;
 	int err, out_nb_samples;
@@ -123,25 +121,28 @@ static int convert_and_write(looper_data_t *ld, int in_sample_rate, int64_t in_c
 	|| in_sample_rate != ld->swr_ctx->in_sample_rate
 	|| in_sample_fmt != ld->swr_ctx->in_sample_fmt)){
 		if(ld->swr_ctx)
-			av_log(ld->swr_ctx, AV_LOG_WARNING, "resampler reinit: %d Hz, %d (%ld) ch, %s -> %d Hz, %d (%ld) ch, %s\n",
+			av_log(ld->swr_ctx, AV_LOG_INFO, "resampler reinit: %d Hz, %d (%ld) ch, %s -> %d Hz, %d (%ld) ch, %s\n",
 				ld->swr_ctx->in_sample_rate, av_get_channel_layout_nb_channels(ld->swr_ctx->in_ch_layout), ld->swr_ctx->in_ch_layout,
 				av_get_sample_fmt_name(ld->swr_ctx->in_sample_fmt), in_sample_rate, av_get_channel_layout_nb_channels(in_ch_layout),
 				in_ch_layout, av_get_sample_fmt_name(in_sample_fmt));
 
 		if(!(ld->swr_ctx = swr_alloc_set_opts(ld->swr_ctx,
 			ld->out_stream->codecpar->channel_layout, ld->out_stream->codecpar->format, ld->out_stream->codecpar->sample_rate,
-			in_ch_layout, in_sample_fmt, in_sample_rate, 0, NULL)))
+			in_ch_layout, in_sample_fmt, in_sample_rate, 0, NULL))){
+				av_log(ld->out_ctx, AV_LOG_ERROR, "cannot allocate swr context\n");
 				return AVERROR(ENOMEM);
+			}
 
 		if((err = swr_init(ld->swr_ctx)) < 0){
 			swr_free(&ld->swr_ctx);
+			av_log(ld->out_ctx, AV_LOG_ERROR, "cannot init swr: %s\n", av_err2str(err));
 			return err;
 		}
 	}
 
 	out_nb_samples = av_rescale_rnd(in_nb_samples, ld->out_stream->codecpar->sample_rate, in_sample_rate, AV_ROUND_UP);
 	if((err = av_samples_alloc_array_and_samples(&out_samples, NULL, ld->out_stream->codecpar->channels, out_nb_samples, ld->out_stream->codecpar->format, 1)) < 0){
-		av_log(ld->out_ctx, AV_LOG_ERROR, "cannot allocate samples: %s\n", av_err2str(err));
+		av_log(ld->out_ctx, AV_LOG_ERROR, "cannot allocate %u samples: %s\n", out_nb_samples, av_err2str(err));
 		goto cleanup;
 	}
 
@@ -153,7 +154,7 @@ static int convert_and_write(looper_data_t *ld, int in_sample_rate, int64_t in_c
 	av_init_packet(&pkt);
 	pkt.data = out_samples[0];
 	pkt.size = av_samples_get_buffer_size(NULL, ld->out_stream->codecpar->channels, err, ld->out_stream->codecpar->format, 1);
-	if(ttt&&(err = ld->out_ctx->oformat->write_packet(ld->out_ctx, &pkt)) < 0)
+	if((err = ld->out_ctx->oformat->write_packet(ld->out_ctx, &pkt)) < 0)
 		av_log(ld->out_ctx, AV_LOG_ERROR, "cannot write packet: %s\n", av_err2str(err));
 
 cleanup:
@@ -165,21 +166,10 @@ cleanup:
 	return err;
 }
 
-static int read_decode_convert_and_store(looper_data_t *ld){
-	AVFrame *frame = NULL;
-	int err;
-
-	if(!(err = decode_audio_frame(ld, &frame)))
-		err = convert_and_write(ld, frame->sample_rate, frame->channel_layout, frame->format, (const uint8_t**)frame->extended_data, frame->nb_samples,1);
-	av_frame_free(&frame);
-
-	return err;
-}
-
 static int alsa_reader(void *data, uint8_t *buf, int buf_size){
-	AVCodecParameters *cp;
 	looper_data_t *ld = data;
 	int readed = 0, tmp;
+	AVCodecParameters *cp;
 	uint8_t *in_samples[2];
 	uint32_t state;
 
@@ -209,14 +199,14 @@ static int alsa_reader(void *data, uint8_t *buf, int buf_size){
 				if(state == SPDIF_SYNCWORD){
 					cp = 0;
 					ld->in_pcm_mode = 0;
-					av_log(ld->in_alsa_ctx, AV_LOG_INFO, "SPDIF SYNC found, stop PCM\n");
+					av_log(ld->in_alsa_ctx, AV_LOG_INFO, "SPDIF SYNC found, stop PCM loop\n");
 					break;
 				}
 			}
 			if(cp && cp->channels > 0 && cp->channels < 3){
 				in_samples[0] = buf;
 				in_samples[1] = NULL;
-				convert_and_write(ld, cp->sample_rate, av_get_default_channel_layout(cp->channels), cp->format, (const uint8_t **)&in_samples, readed / cp->frame_size,1);
+				convert_and_write(ld, cp->sample_rate, av_get_default_channel_layout(cp->channels), cp->format, (const uint8_t **)&in_samples, readed / cp->frame_size);
 			}
 		}
 	}else
@@ -225,89 +215,7 @@ static int alsa_reader(void *data, uint8_t *buf, int buf_size){
 	return readed;
 }
 
-int main(int argc, char **argv){
-	char *in_dev_name = "hw:1";
-	char *out_dev_name = "hw:1";
-
-	int err;
-	looper_data_t ld = {0};
-
-	for (int opt = 0; (opt = getopt(argc, argv, "d:hi:o:tv")) != -1;){
-		switch (opt){
-		case 'i':
-			in_dev_name = optarg;
-			break;
-		case 'o':
-			out_dev_name = optarg;
-			break;
-		default:
-			usage();
-			/* NOTREACHED */
-		}
-	}
-	argc -= optind;
-	argv += optind;
-
-	if(argc != 0)
-		usage();
-
-	if(!in_dev_name){
-		fprintf(stderr, "please specify either input device\n\n");
-		usage();
-	}
-
-	if(verbose){
-		av_log_set_flags(av_log_get_flags()|AV_LOG_PRINT_LEVEL|AV_LOG_SKIP_REPEATED);
-		av_log_set_level(AV_LOG_TRACE);
-	}
-
-	avdevice_register_all();
-
-	//FORMAT
-	if(!(ld.alsa_fmt = av_find_input_format("alsa"))){
-		av_log(NULL, AV_LOG_ERROR, "cannot find alsa input driver\n");
-		return -1;
-	}
-
-	if(!(ld.spdif_fmt = av_find_input_format("spdif"))){
-		av_log(NULL, AV_LOG_ERROR, "cannot find spdif demux driver\n");
-		return -1;
-	}
-
-	//INPUT
-	if((err = init_input(&ld, in_dev_name)) < 0){
-		av_log(NULL, AV_LOG_ERROR, "cannot init input: %s\n", av_err2str(err));
-		return cleanup(&ld, err);
-	}
-
-	//OUTPUT
-	if((err = init_output(&ld, out_dev_name, AV_SAMPLE_FMT_S16, 48000, 6)) < 0){
-		av_log(NULL, AV_LOG_ERROR, "cannot init output: %s\n", av_err2str(err));
-		return cleanup(&ld, err);
-	}
-
-
-	while(1){
-
-		//SPDIF
-		if(!ld.in_spdif_ctx && (err = init_spdif(&ld)) < 0){
-			av_log(NULL, AV_LOG_ERROR, "cannot init spdif: %s\n", av_err2str(err));
-			return cleanup(&ld, err);
-		}
-
-		if((err = read_decode_convert_and_store(&ld)) < 0){
-			if(err != AVERROR(EAGAIN)){
-av_log(NULL, AV_LOG_ERROR, "cannot decode & convert & store\n");
-				cleanup_spdif(&ld, err);
-//				if(ld.swr_ctx)
-//					swr_free(&ld.swr_ctx);
-//				sleep(3);
-			}
-		}
-	}
-}
-
-int init_input(looper_data_t *ld, const char *in_dev_name){
+static int init_input(looper_data_t *ld, const char *in_dev_name){
 	int err;
 
 	if((err = avformat_open_input(&ld->in_alsa_ctx, in_dev_name, ld->alsa_fmt, NULL)) < 0){
@@ -326,7 +234,7 @@ int init_input(looper_data_t *ld, const char *in_dev_name){
 	return 0;
 }
 
-int init_output(looper_data_t *ld, const char *out_dev_name, int format, int sample_rate, int channels){
+static int init_output(looper_data_t *ld, const char *out_dev_name, int format, int sample_rate, int channels, int64_t channel_layout){
 	int err;
 
 	if((err = avformat_alloc_output_context2(&ld->out_ctx, NULL, "alsa", out_dev_name)) < 0){
@@ -342,7 +250,7 @@ int init_output(looper_data_t *ld, const char *out_dev_name, int format, int sam
 	ld->out_stream->codecpar->codec_type = AVMEDIA_TYPE_AUDIO;
 	ld->out_stream->codecpar->codec_id = ld->out_ctx->oformat->audio_codec;
 	ld->out_stream->codecpar->channels = channels;
-	ld->out_stream->codecpar->channel_layout = av_get_default_channel_layout(channels);
+	ld->out_stream->codecpar->channel_layout = channel_layout;
 	ld->out_stream->codecpar->sample_rate = sample_rate;
 	ld->out_stream->codecpar->format = format;
 
@@ -357,7 +265,7 @@ int init_output(looper_data_t *ld, const char *out_dev_name, int format, int sam
 	return 0;
 }
 
-int init_spdif(looper_data_t *ld){
+static int init_spdif(looper_data_t *ld){
 	AVCodec *codec;
 	uint8_t *buffer;
 	int err;
@@ -385,9 +293,9 @@ int init_spdif(looper_data_t *ld){
 		return cleanup_spdif(ld, AVERROR(ENOMEM));
 	}
 
-	ld->in_spdif_ctx->probesize = ALSA_IO_BUFFER_SIZE * 0 + 4096;
+	ld->in_spdif_ctx->probesize = SPDIF_IN_CODEC_PROBESIZE;
 	if((err = avformat_find_stream_info(ld->in_spdif_ctx, NULL)) < 0){
-		av_log(ld->in_spdif_ctx, AV_LOG_ERROR, "cannot find stream info: %s\n", av_err2str(err));
+		av_log(ld->in_spdif_ctx, AV_LOG_WARNING, "cannot find stream info: %s\n", av_err2str(err));
 		return cleanup_spdif(ld, err);
 	}
 	avformat_flush(ld->in_spdif_ctx);
@@ -421,4 +329,81 @@ int init_spdif(looper_data_t *ld){
 	}
 
 	return 0;
+}
+
+int main(int argc, char **argv){
+	int err;
+	char *in_dev_name = "hw:1";
+	char *out_dev_name = "hw:1";
+	AVFrame *frame = NULL;
+
+	for(int opt = 0; (opt = getopt(argc, argv, "i:o:v")) != -1;){
+		switch (opt){
+		case 'i':
+			in_dev_name = optarg;
+			break;
+		case 'o':
+			out_dev_name = optarg;
+			break;
+		case 'v':
+			verbose = 1;
+			break;
+		default:
+			usage(argv[0]);
+		}
+	}
+
+	//signals
+	signal(SIGINT, die);
+	signal(SIGQUIT, die);
+	signal(SIGTERM, die);
+	signal(SIGSEGV, sf);
+	signal(SIGPIPE, SIG_IGN);
+
+	if(verbose){
+		av_log_set_flags(av_log_get_flags()|AV_LOG_PRINT_LEVEL|AV_LOG_SKIP_REPEATED);
+		av_log_set_level(AV_LOG_TRACE);
+	}
+
+	avdevice_register_all();
+
+	//FORMAT
+	if(!(ld.alsa_fmt = av_find_input_format("alsa"))){
+		av_log(NULL, AV_LOG_ERROR, "cannot find alsa input driver\n");
+		return -1;
+	}
+
+	if(!(ld.spdif_fmt = av_find_input_format("spdif"))){
+		av_log(NULL, AV_LOG_ERROR, "cannot find spdif demux driver\n");
+		return -1;
+	}
+
+	//INPUT
+	if((err = init_input(&ld, in_dev_name)) < 0){
+		av_log(NULL, AV_LOG_ERROR, "cannot init input: %s\n", av_err2str(err));
+		return cleanup(&ld, err);
+	}
+
+	//OUTPUT
+	if((err = init_output(&ld, out_dev_name, AV_SAMPLE_FMT_S16, 48000, 6, av_get_default_channel_layout(6))) < 0){
+		av_log(NULL, AV_LOG_ERROR, "cannot init output: %s\n", av_err2str(err));
+		return cleanup(&ld, err);
+	}
+
+	//LOOP
+	while(1){
+
+		//SPDIF
+		if(!ld.in_spdif_ctx && (err = init_spdif(&ld)) < 0){
+			av_log(NULL, AV_LOG_ERROR, "cannot init spdif: %s\n", av_err2str(err));
+			return cleanup(&ld, err);
+		}
+
+		if(!(err = decode_audio_frame(&ld, &frame)))
+			err = convert_and_write(&ld, frame->sample_rate, frame->channel_layout, frame->format, (const uint8_t**)frame->extended_data, frame->nb_samples);
+		else
+			cleanup_spdif(&ld, err);
+
+		av_frame_free(&frame);
+	}
 }
