@@ -10,8 +10,7 @@ just in software.
 Requirements
 ------------
 
-- ffmpeg/libav
-- libao
+- ffmpeg
 
 
 Build
@@ -43,3 +42,4 @@ Contact
 -------
 
 Simon Schubert <2@0x2c.org>
+Sergey S <vatanuki.kun@gmail.com>
