@@ -7,6 +7,7 @@
 #include <libavdevice/avdevice.h>
 #include <libswresample/swresample.h>
 #include <libswresample/swresample_internal.h> //need to remove this
+#include <libavdevice/alsa.h> //tmp??
 
 #define SPDIF_SYNCWORD 0x72F81F4E
 #define SPDIF_IN_CODEC_PROBESIZE 4096
@@ -32,7 +33,7 @@ typedef struct looper_data_s {
 	AVStream *out_stream;
 } looper_data_t;
 
-static int verbose = 0;
+static int verbose = 1;
 static looper_data_t ld = {0};
 
 static void usage(char *self){
@@ -236,6 +237,7 @@ static int init_input(looper_data_t *ld, const char *in_dev_name){
 
 static int init_output(looper_data_t *ld, const char *out_dev_name, int format, int sample_rate, int channels, int64_t channel_layout){
 	int err;
+	AlsaData *s;
 
 	if((err = avformat_alloc_output_context2(&ld->out_ctx, NULL, "alsa", out_dev_name)) < 0){
 		av_log(NULL, AV_LOG_ERROR, "cannot open alsa %s output: %s\n", out_dev_name, av_err2str(err));
@@ -259,8 +261,16 @@ static int init_output(looper_data_t *ld, const char *out_dev_name, int format, 
 		return cleanup(ld, err);
 	}
 
-	if(verbose)
+	s = ld->out_ctx->priv_data;
+	if(s->reorder_func){
+		s->reorder_func = NULL;
+		av_freep(&s->reorder_buf);
+	}
+
+	if(verbose){
 		av_dump_format(ld->out_ctx, 0, out_dev_name, 1);
+		av_log(ld->out_ctx, AV_LOG_INFO, "output: %d Hz, %d (%ld) ch, %s\n", sample_rate, channels, channel_layout, av_get_sample_fmt_name(format));
+	}
 
 	return 0;
 }
@@ -333,8 +343,8 @@ static int init_spdif(looper_data_t *ld){
 
 int main(int argc, char **argv){
 	int err;
-	char *in_dev_name = "hw:1";
-	char *out_dev_name = "hw:1";
+	char *in_dev_name = "hw:0";
+	char *out_dev_name = "hw:0";
 	AVFrame *frame = NULL;
 
 	for(int opt = 0; (opt = getopt(argc, argv, "i:o:v")) != -1;){
@@ -385,7 +395,7 @@ int main(int argc, char **argv){
 	}
 
 	//OUTPUT
-	if((err = init_output(&ld, out_dev_name, AV_SAMPLE_FMT_S16, 48000, 6, av_get_default_channel_layout(6))) < 0){
+	if((err = init_output(&ld, out_dev_name, AV_SAMPLE_FMT_S16, 48000, 6, AV_CH_LAYOUT_5POINT1)) < 0){
 		av_log(NULL, AV_LOG_ERROR, "cannot init output: %s\n", av_err2str(err));
 		return cleanup(&ld, err);
 	}
