@@ -3,18 +3,14 @@
 #include <stdio.h>
 #include <signal.h>
 #include <getopt.h>
+#include <unistd.h>
 
 #include <libavdevice/avdevice.h>
 #include <libswresample/swresample.h>
-//#include <libswresample/swresample_internal.h>
-#include "swresample_internal.h" //need to remove this
-#include "alsa.h" //tmp??
+#include <libswresample/swresample_internal.h> //need to remove this
+//#include "swresample_internal.h" //need to remove this
 
-#define SPDIF_SYNCWORD 0x72F81F4E
-#define SPDIF_IN_CODEC_PROBESIZE 4096
-
-#define ALSA_IO_BUFFER_SIZE 512
-#define PCM_DETECT_DELAY_SIZE 512*1024
+#include "spdif-loop.h"
 
 typedef struct looper_data_s {
 	AVPacket in_pkt;
@@ -34,11 +30,12 @@ typedef struct looper_data_s {
 	AVStream *out_stream;
 } looper_data_t;
 
-static int verbose = 1;
+static int upmix = 0;
+static int verbose = 0;
 static looper_data_t ld = {0};
 
 static void usage(char *self){
-	fprintf(stderr, "Usage: %s [-v verbose] -i <input> -o <output>\n", self);
+	fprintf(stderr, "Usage: %s [-m upmix] [-vvv verbose] -i <input> -o <output>\n", self);
 	exit(-1);
 }
 
@@ -117,13 +114,13 @@ static int convert_and_write(looper_data_t *ld, int in_sample_rate, int64_t in_c
 	AVPacket pkt;
 	uint8_t **out_samples = NULL;
 	int err, out_nb_samples;
-	double matrix[SWR_CH_MAX][SWR_CH_MAX];
+	double matrix[NUM_NAMED_CHANNELS][NUM_NAMED_CHANNELS];
 
 	if((!ld->swr_ctx
 	|| in_ch_layout != ld->swr_ctx->in_ch_layout
 	|| in_sample_rate != ld->swr_ctx->in_sample_rate
 	|| in_sample_fmt != ld->swr_ctx->in_sample_fmt)){
-		if(ld->swr_ctx)
+		if(verbose && ld->swr_ctx)
 			av_log(ld->swr_ctx, AV_LOG_INFO, "resampler reinit: %d Hz, %d (%lld) ch, %s -> %d Hz, %d (%lld) ch, %s\n",
 				ld->swr_ctx->in_sample_rate, av_get_channel_layout_nb_channels(ld->swr_ctx->in_ch_layout), ld->swr_ctx->in_ch_layout,
 				av_get_sample_fmt_name(ld->swr_ctx->in_sample_fmt), in_sample_rate, av_get_channel_layout_nb_channels(in_ch_layout),
@@ -136,38 +133,20 @@ static int convert_and_write(looper_data_t *ld, int in_sample_rate, int64_t in_c
 				return AVERROR(ENOMEM);
 			}
 
-
-#define FRONT_LEFT             0
-#define FRONT_RIGHT            1
-#define FRONT_CENTER           2
-#define LOW_FREQUENCY          3
-#define BACK_LEFT              4
-#define BACK_RIGHT             5
-#define FRONT_LEFT_OF_CENTER   6
-#define FRONT_RIGHT_OF_CENTER  7
-#define BACK_CENTER            8
-#define SIDE_LEFT              9
-#define SIDE_RIGHT             10
-#define TOP_CENTER             11
-#define TOP_FRONT_LEFT         12
-#define TOP_FRONT_CENTER       13
-#define TOP_FRONT_RIGHT        14
-#define TOP_BACK_LEFT          15
-#define TOP_BACK_CENTER        16
-#define TOP_BACK_RIGHT         17
-#define NUM_NAMED_CHANNELS     18
-
-//matrix = malloc(sizeof(ld->swr_ctx->matrix));
-if(av_get_channel_layout_nb_channels(in_ch_layout) == 2){
-memset(&matrix, 0, sizeof(matrix));
-matrix[FRONT_LEFT][FRONT_LEFT] = 1.0;
-matrix[FRONT_RIGHT][FRONT_RIGHT] = 1.0;
-matrix[BACK_LEFT][FRONT_LEFT] = 0.7;
-matrix[BACK_RIGHT][FRONT_RIGHT] = 0.7;
-matrix[LOW_FREQUENCY][FRONT_LEFT] = 0.4;
-matrix[LOW_FREQUENCY][FRONT_RIGHT] = 0.4;
-swr_set_matrix(ld->swr_ctx, (const double *)&matrix, SWR_CH_MAX);
-}
+		if(upmix && av_get_channel_layout_nb_channels(in_ch_layout) == 2){
+			memset(&matrix, 0, sizeof(matrix));
+			matrix[FRONT_LEFT][FRONT_LEFT] = 1.0;
+			matrix[FRONT_RIGHT][FRONT_RIGHT] = 1.0;
+			matrix[FRONT_CENTER][FRONT_LEFT] = 0.5;
+			matrix[FRONT_CENTER][FRONT_RIGHT] = 0.5;
+			matrix[LOW_FREQUENCY][FRONT_LEFT] = 0.4;
+			matrix[LOW_FREQUENCY][FRONT_RIGHT] = 0.4;
+			matrix[BACK_LEFT][FRONT_LEFT] = 0.7;
+			matrix[BACK_RIGHT][FRONT_RIGHT] = 0.7;
+			swr_set_matrix(ld->swr_ctx, (const double *)&matrix, NUM_NAMED_CHANNELS);
+			if(verbose)
+				av_log(ld->swr_ctx, AV_LOG_INFO, "upmixing 2.0 > 5.1\n");
+		}
 
 		if((err = swr_init(ld->swr_ctx)) < 0){
 			swr_free(&ld->swr_ctx);
@@ -235,7 +214,8 @@ static int alsa_reader(void *data, uint8_t *buf, int buf_size){
 				if(state == SPDIF_SYNCWORD){
 					cp = 0;
 					ld->in_pcm_mode = 0;
-					av_log(ld->in_alsa_ctx, AV_LOG_INFO, "SPDIF SYNC found, stop PCM loop\n");
+					if(verbose)
+						av_log(ld->in_alsa_ctx, AV_LOG_INFO, "SPDIF SYNC found, stop PCM loop\n");
 					break;
 				}
 			}
@@ -272,7 +252,6 @@ static int init_input(looper_data_t *ld, const char *in_dev_name){
 
 static int init_output(looper_data_t *ld, const char *out_dev_name, int format, int sample_rate, int channels, int64_t channel_layout){
 	int err;
-	AlsaData *s;
 
 	if((err = avformat_alloc_output_context2(&ld->out_ctx, NULL, "alsa", out_dev_name)) < 0){
 		av_log(NULL, AV_LOG_ERROR, "cannot open alsa %s output: %s\n", out_dev_name, av_err2str(err));
@@ -287,7 +266,7 @@ static int init_output(looper_data_t *ld, const char *out_dev_name, int format, 
 	ld->out_stream->codecpar->codec_type = AVMEDIA_TYPE_AUDIO;
 	ld->out_stream->codecpar->codec_id = ld->out_ctx->oformat->audio_codec;
 	ld->out_stream->codecpar->channels = channels;
-	ld->out_stream->codecpar->channel_layout = channel_layout;
+	ld->out_stream->codecpar->channel_layout = 0;
 	ld->out_stream->codecpar->sample_rate = sample_rate;
 	ld->out_stream->codecpar->format = format;
 
@@ -296,11 +275,8 @@ static int init_output(looper_data_t *ld, const char *out_dev_name, int format, 
 		return cleanup(ld, err);
 	}
 
-	s = ld->out_ctx->priv_data;
-	if(s->reorder_func){
-		s->reorder_func = NULL;
-		av_freep(&s->reorder_buf);
-	}
+	//set after avformat_write_header to prevent creating reorder_func
+	ld->out_stream->codecpar->channel_layout = channel_layout;
 
 	if(verbose){
 		av_dump_format(ld->out_ctx, 0, out_dev_name, 1);
@@ -382,7 +358,7 @@ int main(int argc, char **argv){
 	char *out_dev_name = "hw:Device";
 	AVFrame *frame = NULL;
 
-	for(int opt = 0; (opt = getopt(argc, argv, "i:o:v")) != -1;){
+	for(int opt = 0; (opt = getopt(argc, argv, "i:o:vm")) != -1;){
 		switch (opt){
 		case 'i':
 			in_dev_name = optarg;
@@ -391,7 +367,10 @@ int main(int argc, char **argv){
 			out_dev_name = optarg;
 			break;
 		case 'v':
-			verbose = 1;
+			verbose++;
+			break;
+		case 'm':
+			upmix++;
 			break;
 		default:
 			usage(argv[0]);
@@ -405,13 +384,13 @@ int main(int argc, char **argv){
 	signal(SIGSEGV, sf);
 	signal(SIGPIPE, SIG_IGN);
 
-	if(verbose){
-		av_log_set_flags(av_log_get_flags()|AV_LOG_PRINT_LEVEL|AV_LOG_SKIP_REPEATED);
-		av_log_set_level(AV_LOG_TRACE);
-	}
+	av_log_set_flags(av_log_get_flags()|AV_LOG_PRINT_LEVEL|AV_LOG_SKIP_REPEATED);
+	av_log_set_level(verbose > 2 ? AV_LOG_TRACE : (verbose > 1 ? AV_LOG_DEBUG : (verbose ? AV_LOG_VERBOSE : AV_LOG_QUIET)));
 
-	//av_register_all();
-	//avcodec_register_all();
+#ifndef FF_API_NEXT
+	av_register_all();
+	avcodec_register_all();
+#endif
 	avdevice_register_all();
 
 	//FORMAT
@@ -442,8 +421,8 @@ int main(int argc, char **argv){
 
 		//SPDIF
 		if(!ld.in_spdif_ctx && (err = init_spdif(&ld)) < 0){
-			av_log(NULL, AV_LOG_ERROR, "cannot init spdif: %s\n", av_err2str(err));
-			return cleanup(&ld, err);
+			av_log(NULL, AV_LOG_ERROR, "cannot init spdif #1: %s\n", av_err2str(err));
+			continue;
 		}
 
 		if(!(err = decode_audio_frame(&ld, &frame)))
