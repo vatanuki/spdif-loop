@@ -6,8 +6,9 @@
 
 #include <libavdevice/avdevice.h>
 #include <libswresample/swresample.h>
-#include <libswresample/swresample_internal.h> //need to remove this
-#include <libavdevice/alsa.h> //tmp??
+//#include <libswresample/swresample_internal.h>
+#include "swresample_internal.h" //need to remove this
+#include "alsa.h" //tmp??
 
 #define SPDIF_SYNCWORD 0x72F81F4E
 #define SPDIF_IN_CODEC_PROBESIZE 4096
@@ -48,7 +49,7 @@ static int cleanup_spdif(looper_data_t *ld, int err){
 			ld->in_pkt_offset = 0;
 			av_packet_unref(&ld->in_pkt);
 			av_freep(&ld->in_spdif_ctx->pb->buffer);
-			avio_context_free(&ld->in_spdif_ctx->pb);
+			av_freep(&ld->in_spdif_ctx->pb);
 		}
 		avformat_close_input(&ld->in_spdif_ctx);
 	}
@@ -116,13 +117,14 @@ static int convert_and_write(looper_data_t *ld, int in_sample_rate, int64_t in_c
 	AVPacket pkt;
 	uint8_t **out_samples = NULL;
 	int err, out_nb_samples;
+	double matrix[SWR_CH_MAX][SWR_CH_MAX];
 
 	if((!ld->swr_ctx
 	|| in_ch_layout != ld->swr_ctx->in_ch_layout
 	|| in_sample_rate != ld->swr_ctx->in_sample_rate
 	|| in_sample_fmt != ld->swr_ctx->in_sample_fmt)){
 		if(ld->swr_ctx)
-			av_log(ld->swr_ctx, AV_LOG_INFO, "resampler reinit: %d Hz, %d (%ld) ch, %s -> %d Hz, %d (%ld) ch, %s\n",
+			av_log(ld->swr_ctx, AV_LOG_INFO, "resampler reinit: %d Hz, %d (%lld) ch, %s -> %d Hz, %d (%lld) ch, %s\n",
 				ld->swr_ctx->in_sample_rate, av_get_channel_layout_nb_channels(ld->swr_ctx->in_ch_layout), ld->swr_ctx->in_ch_layout,
 				av_get_sample_fmt_name(ld->swr_ctx->in_sample_fmt), in_sample_rate, av_get_channel_layout_nb_channels(in_ch_layout),
 				in_ch_layout, av_get_sample_fmt_name(in_sample_fmt));
@@ -133,6 +135,39 @@ static int convert_and_write(looper_data_t *ld, int in_sample_rate, int64_t in_c
 				av_log(ld->out_ctx, AV_LOG_ERROR, "cannot allocate swr context\n");
 				return AVERROR(ENOMEM);
 			}
+
+
+#define FRONT_LEFT             0
+#define FRONT_RIGHT            1
+#define FRONT_CENTER           2
+#define LOW_FREQUENCY          3
+#define BACK_LEFT              4
+#define BACK_RIGHT             5
+#define FRONT_LEFT_OF_CENTER   6
+#define FRONT_RIGHT_OF_CENTER  7
+#define BACK_CENTER            8
+#define SIDE_LEFT              9
+#define SIDE_RIGHT             10
+#define TOP_CENTER             11
+#define TOP_FRONT_LEFT         12
+#define TOP_FRONT_CENTER       13
+#define TOP_FRONT_RIGHT        14
+#define TOP_BACK_LEFT          15
+#define TOP_BACK_CENTER        16
+#define TOP_BACK_RIGHT         17
+#define NUM_NAMED_CHANNELS     18
+
+//matrix = malloc(sizeof(ld->swr_ctx->matrix));
+if(av_get_channel_layout_nb_channels(in_ch_layout) == 2){
+memset(&matrix, 0, sizeof(matrix));
+matrix[FRONT_LEFT][FRONT_LEFT] = 1.0;
+matrix[FRONT_RIGHT][FRONT_RIGHT] = 1.0;
+matrix[BACK_LEFT][FRONT_LEFT] = 0.7;
+matrix[BACK_RIGHT][FRONT_RIGHT] = 0.7;
+matrix[LOW_FREQUENCY][FRONT_LEFT] = 0.4;
+matrix[LOW_FREQUENCY][FRONT_RIGHT] = 0.4;
+swr_set_matrix(ld->swr_ctx, (const double *)&matrix, SWR_CH_MAX);
+}
 
 		if((err = swr_init(ld->swr_ctx)) < 0){
 			swr_free(&ld->swr_ctx);
@@ -269,7 +304,7 @@ static int init_output(looper_data_t *ld, const char *out_dev_name, int format, 
 
 	if(verbose){
 		av_dump_format(ld->out_ctx, 0, out_dev_name, 1);
-		av_log(ld->out_ctx, AV_LOG_INFO, "output: %d Hz, %d (%ld) ch, %s\n", sample_rate, channels, channel_layout, av_get_sample_fmt_name(format));
+		av_log(ld->out_ctx, AV_LOG_INFO, "output: %d Hz, %d (%lld) ch, %s\n", sample_rate, channels, channel_layout, av_get_sample_fmt_name(format));
 	}
 
 	return 0;
@@ -343,8 +378,8 @@ static int init_spdif(looper_data_t *ld){
 
 int main(int argc, char **argv){
 	int err;
-	char *in_dev_name = "hw:0";
-	char *out_dev_name = "hw:0";
+	char *in_dev_name = "hw:Device";
+	char *out_dev_name = "hw:Device";
 	AVFrame *frame = NULL;
 
 	for(int opt = 0; (opt = getopt(argc, argv, "i:o:v")) != -1;){
@@ -375,6 +410,8 @@ int main(int argc, char **argv){
 		av_log_set_level(AV_LOG_TRACE);
 	}
 
+	//av_register_all();
+	//avcodec_register_all();
 	avdevice_register_all();
 
 	//FORMAT
