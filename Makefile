@@ -1,16 +1,29 @@
-PROG=	spdif-loop
+PROG = spdif-loop
+OBJS = spdif-loop.o
 
-#CFLAGS+=	-Wall -std=c99 -g -I/usr/include/ffmpeg
-CFLAGS+=	-O0 -Wall -std=c99 -g -I/home/dev/local/ffmpeg
-#LDFLAGS+=	-lavcodec -lavformat -lavdevice -lavutil -lswresample -lm
-LDFLAGS+=	-Wl,-rpath,/home/dev/local/ffmpeg/libavcodec -lavcodec \
-			-Wl,-rpath,/home/dev/local/ffmpeg/libavformat -lavformat \
-			-Wl,-rpath,/home/dev/local/ffmpeg/libavdevice -lavdevice \
-			-Wl,-rpath,/home/dev/local/ffmpeg/libavutil -lavutil \
-			-Wl,-rpath,/home/dev/local/ffmpeg/libswresample -lswresample \
-			-lm
+CC = gcc
+CFLAGS = -g -Wall -Wno-unused-function $(DEFS)
+LDFLAGS = -lavformat -lavdevice -lavcodec -lswresample -lavutil \
+	 -lasound -lpthread -lm
 
-all: ${PROG}
+HEADERS =
+
+all: $(PROG)
+
+$(PROG): $(OBJS)
+	$(CC) -o $@ $(OBJS) $(LDFLAGS)
+	@echo ==================== DONE ====================
+
+install: all
+	install -m 755 $(PROG) /usr/sbin/$(PROG)
 
 clean:
-	-rm -f ${PROG}
+	$(RM) $(OBJS)
+
+distclean: clean
+	$(RM) $(PROG)
+
+%.o: %.c
+	$(CC) $(CFLAGS) -c $*.c -o $*.o
+
+$(OBJS): $(HEADERS)
