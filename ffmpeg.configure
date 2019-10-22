@@ -8,12 +8,11 @@ FFMPEG_CONFIGURE_FLAGS=(
     --disable-autodetect
     --disable-iconv
     --disable-avfilter
-    --disable-filters
     --disable-swscale
     --disable-ffprobe
 
     --enable-demuxer=spdif
-    --enable-decoder=aac,aac_fixed,aac_latm,ac3,ac3_fixed,eac3,dca
+    --enable-decoder=aac*,ac3*,eac3*,dca*,pcm*
 
     --enable-alsa
     --enable-indev=alsa
