@@ -7,8 +7,6 @@
 
 #include <libavdevice/avdevice.h>
 #include <libswresample/swresample.h>
-#include <libswresample/swresample_internal.h> //need to remove this
-//#include "swresample_internal.h" //need to remove this
 
 #include "spdif-loop.h"
 
@@ -28,6 +26,10 @@ typedef struct looper_data_s {
 
 	AVFormatContext *out_ctx;
 	AVStream *out_stream;
+
+	int64_t in_ch_layout;
+	int in_sample_rate;
+	enum AVSampleFormat in_sample_fmt;
 } looper_data_t;
 
 static int upmix = 0;
@@ -117,13 +119,13 @@ static int convert_and_write(looper_data_t *ld, int in_sample_rate, int64_t in_c
 	double matrix[NUM_NAMED_CHANNELS][NUM_NAMED_CHANNELS];
 
 	if((!ld->swr_ctx
-	|| in_ch_layout != ld->swr_ctx->in_ch_layout
-	|| in_sample_rate != ld->swr_ctx->in_sample_rate
-	|| in_sample_fmt != ld->swr_ctx->in_sample_fmt)){
+	|| in_ch_layout != ld->in_ch_layout
+	|| in_sample_rate != ld->in_sample_rate
+	|| in_sample_fmt != ld->in_sample_fmt)){
 		if(verbose && ld->swr_ctx)
 			av_log(ld->swr_ctx, AV_LOG_INFO, "resampler reinit: %d Hz, %d (%lld) ch, %s -> %d Hz, %d (%lld) ch, %s\n",
-				ld->swr_ctx->in_sample_rate, av_get_channel_layout_nb_channels(ld->swr_ctx->in_ch_layout), ld->swr_ctx->in_ch_layout,
-				av_get_sample_fmt_name(ld->swr_ctx->in_sample_fmt), in_sample_rate, av_get_channel_layout_nb_channels(in_ch_layout),
+				ld->in_sample_rate, av_get_channel_layout_nb_channels(ld->in_ch_layout), ld->in_ch_layout,
+				av_get_sample_fmt_name(ld->in_sample_fmt), in_sample_rate, av_get_channel_layout_nb_channels(in_ch_layout),
 				in_ch_layout, av_get_sample_fmt_name(in_sample_fmt));
 
 		if(!(ld->swr_ctx = swr_alloc_set_opts(ld->swr_ctx,
@@ -153,6 +155,10 @@ static int convert_and_write(looper_data_t *ld, int in_sample_rate, int64_t in_c
 			av_log(ld->out_ctx, AV_LOG_ERROR, "cannot init swr: %s\n", av_err2str(err));
 			return err;
 		}
+
+		ld->in_ch_layout = in_ch_layout;
+		ld->in_sample_rate = in_sample_rate;
+		ld->in_sample_fmt = in_sample_fmt;
 	}
 
 	out_nb_samples = av_rescale_rnd(in_nb_samples, ld->out_stream->codecpar->sample_rate, in_sample_rate, AV_ROUND_UP);
