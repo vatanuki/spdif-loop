@@ -1,12 +1,17 @@
 PROG = spdif-loop
 OBJS = spdif-loop.o
+HEADERS = spdif-loop.h
+FFMPEG = ../ffmpeg
 
 CC = gcc
 CFLAGS = -g -Wall -Wno-unused-function $(DEFS)
-LDFLAGS = -lavformat -lavdevice -lavcodec -lswresample -lavutil \
-	 -lasound -lpthread -lm
+LDFLAGS = -lasound -lpthread -lm -lavformat -lavdevice -lavcodec -lswresample -lavutil
 
-HEADERS =
+ifneq ($(wildcard $(FFMPEG)),)
+CFLAGS+= -I$(FFMPEG)
+LDFLAGS+= -L$(FFMPEG)/libavformat -L$(FFMPEG)/libavdevice \
+	-L$(FFMPEG)/libavcodec -L$(FFMPEG)/libswresample -L$(FFMPEG)/libavutil
+endif
 
 all: $(PROG)
 
