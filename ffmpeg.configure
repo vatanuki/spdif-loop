@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+
+FFMPEG_CONFIGURE_FLAGS=(
+    --prefix=/usr
+
+    --disable-everything
+    --disable-network
+    --disable-autodetect
+    --disable-iconv
+    --disable-avfilter
+    --disable-filters
+    --disable-swscale
+    --disable-ffprobe
+
+    --enable-demuxer=spdif
+    --enable-decoder=aac,aac_fixed,aac_latm,ac3,ac3_fixed,eac3,dca
+
+    --enable-alsa
+    --enable-indev=alsa
+    --enable-outdev=alsa
+)
+
+./configure "${FFMPEG_CONFIGURE_FLAGS[@]}"

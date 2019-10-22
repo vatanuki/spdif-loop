@@ -1,0 +1,27 @@
+diff --git a/libavformat/spdifdec.c b/libavformat/spdifdec.c
+index d74f58d82b..2780390593 100644
+--- a/libavformat/spdifdec.c
++++ b/libavformat/spdifdec.c
+@@ -175,9 +175,11 @@ int ff_spdif_read_packet(AVFormatContext *s, AVPacket *pkt)
+     AVIOContext *pb = s->pb;
+     enum IEC61937DataType data_type;
+     enum AVCodecID codec_id;
+-    uint32_t state = 0;
++    uint32_t state;
+     int pkt_size_bits, offset, ret;
+ 
++retry:
++    state = 0;
+     while (state != (AV_BSWAP16C(SYNCWORD1) << 16 | AV_BSWAP16C(SYNCWORD2))) {
+         state = (state << 8) | avio_r8(pb);
+         if (avio_feof(pb))
+@@ -187,6 +189,9 @@ int ff_spdif_read_packet(AVFormatContext *s, AVPacket *pkt)
+     data_type = avio_rl16(pb);
+     pkt_size_bits = avio_rl16(pb);
+ 
++    if (!data_type && !pkt_size_bits)
++        goto retry;
++
+     if (pkt_size_bits % 16)
+         avpriv_request_sample(s, "Packet not ending at a 16-bit boundary");
+ 
