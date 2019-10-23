@@ -1,11 +1,11 @@
 PROG = spdif-loop
-OBJS = spdif-loop.o
-HEADERS = spdif-loop.h
+OBJS = spdif-loop.o control.o ubuntuMono_8pt.o ubuntuMono_16pt.o ubuntuMono_24pt.o ssd1306.o
+HEADERS = spdif-loop.h font.h ubuntuMono_8pt.h ubuntuMono_16pt.h ubuntuMono_24pt.h ssd1306.h
 FFMPEG = ../ffmpeg
 
 CC = gcc
 CFLAGS = -g -Wall -Wno-unused-function $(DEFS)
-LDFLAGS = -lasound -lpthread -lm -lavformat -lavdevice -lavcodec -lswresample -lavutil
+LDFLAGS = -lwiringPi -lasound -lpthread -lm -lavformat -lavdevice -lavcodec -lswresample -lavutil
 
 ifneq ($(wildcard $(FFMPEG)),)
 CFLAGS+= -I$(FFMPEG)

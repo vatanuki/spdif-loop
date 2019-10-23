@@ -1,43 +1,29 @@
+/*
+ * File:   spdif-loop.c
+ * Author: vatanuki.kun
+ *
+ * Created on October 23, 2019, 9:28 PM
+ */
+
 #define _GNU_SOURCE
 
 #include <stdio.h>
 #include <signal.h>
 #include <getopt.h>
 #include <unistd.h>
-
-#include <libavdevice/avdevice.h>
-#include <libswresample/swresample.h>
+#include <sys/ioctl.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <linux/i2c-dev.h>
+#include <fcntl.h>
+#include <pthread.h>
 
 #include "spdif-loop.h"
 
-typedef struct looper_data_s {
-	AVPacket in_pkt;
-	int in_pkt_offset;
-	int in_pcm_mode;
-
-	AVInputFormat *alsa_fmt;
-	AVInputFormat *spdif_fmt;
-
-	AVFormatContext *in_alsa_ctx;
-	AVFormatContext *in_spdif_ctx;
-	AVCodecContext *in_codec_ctx;
-
-	SwrContext *swr_ctx;
-
-	AVFormatContext *out_ctx;
-	AVStream *out_stream;
-
-	int64_t in_ch_layout;
-	int in_sample_rate;
-	enum AVSampleFormat in_sample_fmt;
-} looper_data_t;
-
-static int upmix = 0;
 static int verbose = 0;
-static looper_data_t ld = {0};
 
 static void usage(char *self){
-	fprintf(stderr, "Usage: %s [-m upmix] [-vvv verbose] -i <input> -o <output>\n", self);
+	fprintf(stderr, "Usage: %s [-m upmix] [-vvv verbose] [-i input] [-o output] [-b i2c device] [-a i2c addr]\n", self);
 	exit(-1);
 }
 
@@ -63,6 +49,10 @@ static int cleanup(looper_data_t *ld, int err){
 		ld->out_ctx = NULL;
 	}
 	avformat_close_input(&ld->in_alsa_ctx);
+	if(ld->i2c_fd >= 0){
+		close(ld->i2c_fd);
+		ld->i2c_fd = -1;
+	}
 	return err;
 }
 
@@ -135,7 +125,7 @@ static int convert_and_write(looper_data_t *ld, int in_sample_rate, int64_t in_c
 				return AVERROR(ENOMEM);
 			}
 
-		if(upmix && av_get_channel_layout_nb_channels(in_ch_layout) == 2){
+		if(ld->upmix && av_get_channel_layout_nb_channels(in_ch_layout) == 2){
 			memset(&matrix, 0, sizeof(matrix));
 			matrix[FRONT_LEFT][FRONT_LEFT] = 1.0;
 			matrix[FRONT_RIGHT][FRONT_RIGHT] = 1.0;
@@ -360,11 +350,16 @@ static int init_spdif(looper_data_t *ld){
 
 int main(int argc, char **argv){
 	int err;
+	pthread_t thread_id;
+	pthread_attr_t thread_attr;
 	char *in_dev_name = "hw:Device";
 	char *out_dev_name = "hw:Device";
+	char *i2c_dev_name = "/dev/i2c-0";
+	int i2c_addr = 0x3c;
 	AVFrame *frame = NULL;
+	looper_data_t ld = {0};
 
-	for(int opt = 0; (opt = getopt(argc, argv, "i:o:vm")) != -1;){
+	for(int opt = 0; (opt = getopt(argc, argv, "i:o:b:a:vm")) != -1;){
 		switch (opt){
 		case 'i':
 			in_dev_name = optarg;
@@ -372,11 +367,17 @@ int main(int argc, char **argv){
 		case 'o':
 			out_dev_name = optarg;
 			break;
+		case 'b':
+			i2c_dev_name = optarg;
+			break;
+		case 'a':
+			i2c_addr = atoi(optarg);
+			break;
 		case 'v':
 			verbose++;
 			break;
 		case 'm':
-			upmix++;
+			ld.upmix++;
 			break;
 		default:
 			usage(argv[0]);
@@ -393,6 +394,27 @@ int main(int argc, char **argv){
 	av_log_set_flags(av_log_get_flags()|AV_LOG_PRINT_LEVEL|AV_LOG_SKIP_REPEATED);
 	av_log_set_level(verbose > 2 ? AV_LOG_TRACE : (verbose > 1 ? AV_LOG_DEBUG : (verbose ? AV_LOG_VERBOSE : AV_LOG_QUIET)));
 
+	//I2C
+	if((ld.i2c_fd = open(i2c_dev_name, O_RDWR)) < 0){
+		av_log(NULL, AV_LOG_ERROR, "open: %s | %m\n", i2c_dev_name);
+	}else if(ioctl(ld.i2c_fd, I2C_SLAVE, i2c_addr) < 0){
+		av_log(NULL, AV_LOG_ERROR, "ioctl: %s I2C_SLAVE 0x%02x | %m\n", i2c_dev_name, i2c_addr);
+		close(ld.i2c_fd);
+		ld.i2c_fd = -1;
+	}
+
+	//THREAD
+	if(pthread_attr_init(&thread_attr) || pthread_attr_setdetachstate(&thread_attr, PTHREAD_CREATE_DETACHED)){
+		av_log(NULL, AV_LOG_ERROR, "pthread_attr_init || pthread_attr_setdetachstate | %m\n");
+		return -1;
+	}
+
+	if(pthread_create(&thread_id, &thread_attr, control_thread, &ld)){
+		av_log(NULL, AV_LOG_ERROR, "pthread_create: control_thread | %m\n");
+		return -1;
+	}
+
+	//AV
 #ifndef FF_API_NEXT
 	av_register_all();
 	avcodec_register_all();
