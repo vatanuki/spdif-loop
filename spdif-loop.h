@@ -39,6 +39,11 @@
 #define BTN_DOWN		0x20
 #define BTN_UP			0x40
 
+#define BTN_POLL_DELAY		10
+#define BTN_READ_DELAY		500
+#define BTN_HOLD_DELAY		1000
+#define BTN_REPEAT_DELAY	100
+
 typedef struct looper_data_s {
 	AVPacket in_pkt;
 	int in_pkt_offset;
@@ -60,7 +65,9 @@ typedef struct looper_data_s {
 	int in_sample_rate;
 	enum AVSampleFormat in_sample_fmt;
 
+	int verbose;
 	int upmix;
+
 	int i2c_fd;
 } looper_data_t;
 

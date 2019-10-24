@@ -20,8 +20,6 @@
 
 #include "spdif-loop.h"
 
-static int verbose = 0;
-
 static void usage(char *self){
 	fprintf(stderr, "Usage: %s [-m upmix] [-vvv verbose] [-i input] [-o output] [-b i2c device] [-a i2c addr]\n", self);
 	exit(-1);
@@ -112,7 +110,7 @@ static int convert_and_write(looper_data_t *ld, int in_sample_rate, int64_t in_c
 	|| in_ch_layout != ld->in_ch_layout
 	|| in_sample_rate != ld->in_sample_rate
 	|| in_sample_fmt != ld->in_sample_fmt)){
-		if(verbose && ld->swr_ctx)
+		if(ld->verbose && ld->swr_ctx)
 			av_log(ld->swr_ctx, AV_LOG_INFO, "resampler reinit: %d Hz, %d (%lld) ch, %s -> %d Hz, %d (%lld) ch, %s\n",
 				ld->in_sample_rate, av_get_channel_layout_nb_channels(ld->in_ch_layout), ld->in_ch_layout,
 				av_get_sample_fmt_name(ld->in_sample_fmt), in_sample_rate, av_get_channel_layout_nb_channels(in_ch_layout),
@@ -136,7 +134,7 @@ static int convert_and_write(looper_data_t *ld, int in_sample_rate, int64_t in_c
 			matrix[BACK_LEFT][FRONT_LEFT] = 0.7;
 			matrix[BACK_RIGHT][FRONT_RIGHT] = 0.7;
 			swr_set_matrix(ld->swr_ctx, (const double *)&matrix, NUM_NAMED_CHANNELS);
-			if(verbose)
+			if(ld->verbose)
 				av_log(ld->swr_ctx, AV_LOG_INFO, "upmixing 2.0 > 5.1\n");
 		}
 
@@ -210,7 +208,7 @@ static int alsa_reader(void *data, uint8_t *buf, int buf_size){
 				if(state == SPDIF_SYNCWORD){
 					cp = 0;
 					ld->in_pcm_mode = 0;
-					if(verbose)
+					if(ld->verbose)
 						av_log(ld->in_alsa_ctx, AV_LOG_INFO, "SPDIF SYNC found, stop PCM loop\n");
 					break;
 				}
@@ -240,7 +238,7 @@ static int init_input(looper_data_t *ld, const char *in_dev_name){
 		return cleanup(ld, err);
 	}
 
-	if(verbose)
+	if(ld->verbose)
 		av_dump_format(ld->in_alsa_ctx, 0, in_dev_name, 0);
 
 	return 0;
@@ -274,7 +272,7 @@ static int init_output(looper_data_t *ld, const char *out_dev_name, int format, 
 	//set after avformat_write_header to prevent creating reorder_func
 	ld->out_stream->codecpar->channel_layout = channel_layout;
 
-	if(verbose){
+	if(ld->verbose){
 		av_dump_format(ld->out_ctx, 0, out_dev_name, 1);
 		av_log(ld->out_ctx, AV_LOG_INFO, "output: %d Hz, %d (%lld) ch, %s\n", sample_rate, channels, channel_layout, av_get_sample_fmt_name(format));
 	}
@@ -317,7 +315,7 @@ static int init_spdif(looper_data_t *ld){
 	}
 	avformat_flush(ld->in_spdif_ctx);
 
-	if(verbose)
+	if(ld->verbose)
 		av_dump_format(ld->in_spdif_ctx, 0, "alsa", 0);
 
 	if(ld->in_spdif_ctx->nb_streams != 1){
@@ -374,7 +372,7 @@ int main(int argc, char **argv){
 			i2c_addr = atoi(optarg);
 			break;
 		case 'v':
-			verbose++;
+			ld.verbose++;
 			break;
 		case 'm':
 			ld.upmix++;
@@ -392,7 +390,7 @@ int main(int argc, char **argv){
 	signal(SIGPIPE, SIG_IGN);
 
 	av_log_set_flags(av_log_get_flags()|AV_LOG_PRINT_LEVEL|AV_LOG_SKIP_REPEATED);
-	av_log_set_level(verbose > 2 ? AV_LOG_TRACE : (verbose > 1 ? AV_LOG_DEBUG : (verbose ? AV_LOG_VERBOSE : AV_LOG_QUIET)));
+	av_log_set_level(ld.verbose > 2 ? AV_LOG_TRACE : (ld.verbose > 1 ? AV_LOG_DEBUG : (ld.verbose ? AV_LOG_VERBOSE : AV_LOG_QUIET)));
 
 	//I2C
 	if((ld.i2c_fd = open(i2c_dev_name, O_RDWR)) < 0){
@@ -413,7 +411,7 @@ int main(int argc, char **argv){
 		av_log(NULL, AV_LOG_ERROR, "pthread_create: control_thread | %m\n");
 		return -1;
 	}
-
+while(1);
 	//AV
 #ifndef FF_API_NEXT
 	av_register_all();

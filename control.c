@@ -51,60 +51,84 @@ static int read_btns(void){
 	return btns;
 }
 
-static int wait_btns(int delay_ms){
-	int btns;
-
-	while(read_btns())
-		delay(delay_ms);
-
-	while(!(btns = read_btns()))
-		delay(delay_ms);
-
-	while(read_btns())
-		delay(delay_ms);
-
-	return btns;
-}
-
 void *control_thread(void* av){
+	clock_t c;
+	int btns, btns_last = 0, hold;
 	looper_data_t *ld = (looper_data_t *)av;
 
-	if(ld->i2c_fd >= 0){
+	if(ld->i2c_fd >= 0 && 0){
 		ssd1306Init(ld->i2c_fd, SSD1306_SWITCHCAPVCC);
 		ssd1306ClearScreen();
 		ssd1306SetFont(&ubuntuMono_24ptFontInfo);
 		ssd1306DrawString(0, 4, "OHAYO", 1, WHITE);
 		ssd1306Refresh();
 
-		ssd1306ClearScreen();
-		ssd1306Refresh();
+//		ssd1306ClearScreen();
+//		ssd1306Refresh();
 	}
 
 	init_btns();
 
 	while(1){
-		switch(wait_btns(10)){
+		c = clock();
+
+		do{
+			if((btns = read_btns()))
+				break;
+			btns_last = 0;
+			delay(BTN_POLL_DELAY);
+		}while(clock() - c < BTN_READ_DELAY * 1000);
+
+		if(btns != btns_last){
+			do{
+				if(!read_btns()){
+					btns_last = 0;
+					break;
+				}
+				delay(BTN_POLL_DELAY);
+			}while(clock() - c < BTN_HOLD_DELAY * 1000);
+
+		}else if(btns)
+			delay(BTN_REPEAT_DELAY);
+
+		hold = btns && (btns == btns_last || btns == read_btns());
+
+		switch(btns){
 			case BTN_OK:
-				printf("OK\n");
+				if(ld->verbose)
+					av_log(NULL, AV_LOG_INFO, "button: OK\n");
 				break;
 			case BTN_MENU:
-				printf("MENU\n");
+				if(ld->verbose)
+					av_log(NULL, AV_LOG_INFO, "button: MENU\n");
 				break;
 			case BTN_POWER:
-				printf("POWER\n");
+				if(ld->verbose)
+					av_log(NULL, AV_LOG_INFO, "button: POWER\n");
+/*
+#include <unistd.h>
+#include <linux/reboot.h>
+reboot(LINUX_REBOOT_MAGIC1, LINUX_REBOOT_MAGIC2, LINUX_REBOOT_CMD_POWER_OFF, 0);
+*/
 				break;
 			case BTN_LEFT:
-				printf("LEFT\n");
+				if(ld->verbose)
+					av_log(NULL, AV_LOG_INFO, "button: LEFT\n");
 				break;
 			case BTN_RIGHT:
-				printf("RIGHT\n");
+				if(ld->verbose)
+					av_log(NULL, AV_LOG_INFO, "button: RIGHT\n");
 				break;
 			case BTN_DOWN:
-				printf("DOWN\n");
+				if(ld->verbose)
+					av_log(NULL, AV_LOG_INFO, "button: DOWN\n");
 				break;
 			case BTN_UP:
-				printf("UP\n");
+				if(ld->verbose)
+					av_log(NULL, AV_LOG_INFO, "button: UP\n");
 				break;
 		}
+
+		btns_last = btns;
 	}
 }
