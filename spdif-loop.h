@@ -52,7 +52,7 @@
 #define MENU_POWEROFF	4
 #define MENU_LAST		5
 
-#define MENU_DISPLAY_TIMEOUT 10000
+#define MENU_DISPLAY_TIMEOUT 30000
 
 typedef struct looper_data_s {
 	AVPacket in_pkt;
@@ -75,6 +75,7 @@ typedef struct looper_data_s {
 	int64_t in_ch_layout;
 	int in_sample_rate;
 	enum AVSampleFormat in_sample_fmt;
+	char in_codec_name[4];
 
 	int verbose;
 	int upmix;

@@ -11,13 +11,13 @@
 #include <wiringPi.h>
 #include <alsa/asoundlib.h>
 #include <unistd.h>
-#include <linux/reboot.h>
+#include <sys/reboot.h>
 
 #include "ssd1306.h"
 #include "spdif-loop.h"
 
 static const char *item_channel_name[] = {"MASTER", "FRONT", "CENTER", "LFE", "REAR"};
-static const uint8_t item_channel_range[][2] = {{0,5}, {0,1}, {2,2}, {3,3}, {4,5}};
+static const uint8_t item_channel_range[][2] = {{0,7}, {0,1}, {2,2}, {3,3}, {6,7}};
 
 static uint32_t clock_elapsed_msec(struct timespec *start){
 	struct timespec finish;
@@ -117,14 +117,17 @@ static void mixer_close(snd_mixer_t **mhandle){
 }
 
 void *control_thread(void* av){
+	time_t t;
+	struct tm *tm;
 	struct timespec start;
 	snd_mixer_selem_channel_id_t ch;
-	int i, btns, btns_last = 0, hold, menu = MENU_NONE, item, display = 0;
+	int i = 0, btns, btns_last = 0, hold, menu = MENU_NONE, item, info = 0, display = 0;
 	looper_data_t *ld = (looper_data_t *)av;
 	snd_mixer_t *mhandle = NULL;
 	snd_mixer_elem_t *elem;
-	long v, vol[6], pmin, pmax;
-	char str[22];
+	long v, vol[8], pmin, pmax;
+	char str[22], in_codec_name[sizeof(ld->in_codec_name)];
+	int64_t in_ch_layout = ld->in_ch_layout;
 
 	if(ld->i2c_fd >= 0){
 		ssd1306Init(ld->i2c_fd, SSD1306_SWITCHCAPVCC);
@@ -135,6 +138,8 @@ void *control_thread(void* av){
 	}
 
 	init_btns();
+	av_get_channel_layout_nb_channels(ld->in_ch_layout);
+	snprintf(in_codec_name, sizeof(in_codec_name), "%s", ld->in_codec_name);
 
 	while(1){
 		clock_gettime(CLOCK_MONOTONIC, &start);
@@ -161,36 +166,69 @@ void *control_thread(void* av){
 		hold = btns && (btns == btns_last || btns == read_btns());
 		btns_last = btns;
 
-		if(btns){
-			if(display > MENU_DISPLAY_TIMEOUT){
+		if(btns || i){
+			switch(btns){
+				case BTN_MENU:
+					item = 0;
+					menu = hold ? MENU_SETTINGS : (menu == MENU_VOLUME && display < MENU_DISPLAY_TIMEOUT ? MENU_INFO : MENU_VOLUME);
+					break;
+				case BTN_POWER:
+					item = 0;
+					menu = hold ? MENU_POWEROFF : (menu == MENU_INFO || display < MENU_DISPLAY_TIMEOUT ? MENU_NONE : MENU_INFO);
+					break;
+			}
+
+			if(!display || display >= MENU_DISPLAY_TIMEOUT){
 				if(ld->i2c_fd >= 0)
 					ssd1306Command(SSD1306_DISPLAYON);
 				av_log(NULL, AV_LOG_INFO, "OLED: SSD1306_DISPLAYON\n");
 			}
 
+			if(btns)
+				display = 0;
 			ssd1306ClearScreen();
 
-			switch(btns){
-				case BTN_MENU:
-					if(display > MENU_DISPLAY_TIMEOUT)
-						break;
-					item = 0;
-					if(++menu >= MENU_LAST - 1)
-						menu = MENU_NONE + 1;
-					break;
-				case BTN_POWER:
-					if(hold)
-						menu = MENU_POWEROFF;
-					else
-						menu = MENU_NONE;
-					break;
-			}
-
 			switch(menu){
+				case MENU_NONE:
+					display = MENU_DISPLAY_TIMEOUT - 1;
+					break;
+
 				case MENU_INFO:
-					ssd1306SetFont(&ubuntuMono_24ptFontInfo);
-					snprintf(str, sizeof(str), "5.1 DTS");
+					info = 0;
+					switch(btns){
+						case BTN_LEFT:
+						case BTN_DOWN:
+							if(!item)
+								item = 3;
+							item--;
+							break;
+						case BTN_RIGHT:
+						case BTN_UP:
+							if(++item >= 3)
+								item = 0;
+							break;
+					}
+
+					switch(item){
+						case 1:
+						case 2:
+							t = time(NULL);
+							tm = localtime(&t);
+							ssd1306SetFont(&ubuntuMono_24ptFontInfo);
+							strftime(str, sizeof(str), item == 2 ? " %b %d" : "%H:%M %a", tm);
+							break;
+						default:
+							ssd1306SetFont(&ubuntuMono_24ptFontInfo);
+							i = av_get_channel_layout_nb_channels(ld->in_ch_layout);
+							if(!ld->in_codec_name[0])
+								snprintf(str, sizeof(str), "--- ? CH");
+							else if(i == 2 || i == 6)
+								snprintf(str, sizeof(str), "%s %s", ld->in_codec_name, i == 6 ? "5.1" : "2.0");
+							else
+								snprintf(str, sizeof(str), "%s %d CH", ld->in_codec_name, i);
+					}
 					ssd1306DrawString(0, 4, str, 1, WHITE);
+
 					break;
 
 				case MENU_VOLUME:
@@ -262,7 +300,11 @@ void *control_thread(void* av){
 						ssd1306DrawString(0, 0, str, 1, WHITE);
 						snprintf(str, sizeof(str), "  DOWN");
 						ssd1306DrawString(0, 16, str, 1, WHITE);
-						reboot(LINUX_REBOOT_MAGIC1, LINUX_REBOOT_MAGIC2, LINUX_REBOOT_CMD_POWER_OFF, 0);
+						av_log(NULL, AV_LOG_INFO, "reboot\n");
+						if(ld->i2c_fd >= 0)
+							ssd1306Refresh();
+						sync();
+						reboot(RB_POWER_OFF);
 					}else{
 						snprintf(str, sizeof(str), "POWER OFF?");
 						ssd1306DrawString(0, 8, str, 1, WHITE);
@@ -273,10 +315,11 @@ void *control_thread(void* av){
 			if(ld->i2c_fd >= 0)
 				ssd1306Refresh();
 
-			display = 0;
+			i = 0;
 		}
 
 		if(display < MENU_DISPLAY_TIMEOUT){
+			info+= clock_elapsed_msec(&start);
 			display+= clock_elapsed_msec(&start);
 			if(display >= MENU_DISPLAY_TIMEOUT){
 				if(ld->i2c_fd >= 0)
@@ -285,7 +328,22 @@ void *control_thread(void* av){
 				mixer_close(&mhandle);
 				menu = MENU_VOLUME;
 				item = 0;
+			}else if(menu == MENU_INFO && info >= MENU_DISPLAY_TIMEOUT / 3){
+				i = 1;
+				if(++item >= 3)
+					item = 0;
 			}
+		}
+
+		if((display >= MENU_DISPLAY_TIMEOUT || menu == MENU_NONE || menu == MENU_INFO)
+		&& (strcmp(in_codec_name, ld->in_codec_name) || in_ch_layout != ld->in_ch_layout)){
+			i = 1;
+			menu = MENU_INFO;
+			item = display = 0;
+			in_ch_layout = ld->in_ch_layout;
+			snprintf(in_codec_name, sizeof(in_codec_name), "%s", ld->in_codec_name);
+			av_log(NULL, AV_LOG_INFO, "CONTROL: input %s, %d (%lld) ch\n",
+				in_codec_name, av_get_channel_layout_nb_channels(in_ch_layout), in_ch_layout);
 		}
 	}
 }

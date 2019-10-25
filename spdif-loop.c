@@ -36,6 +36,7 @@ static int cleanup_spdif(looper_data_t *ld, int err){
 		}
 		avformat_close_input(&ld->in_spdif_ctx);
 	}
+	ld->in_codec_name[0] = 0;
 	return err;
 }
 
@@ -207,6 +208,7 @@ static int alsa_reader(void *data, uint8_t *buf, int buf_size){
 				if(state == SPDIF_SYNCWORD){
 					cp = 0;
 					ld->in_pcm_mode = 0;
+					ld->in_codec_name[0] = 0;
 					av_log(ld->in_alsa_ctx, AV_LOG_INFO, "SPDIF SYNC found, stop PCM loop\n");
 					break;
 				}
@@ -215,6 +217,7 @@ static int alsa_reader(void *data, uint8_t *buf, int buf_size){
 				in_samples[0] = buf;
 				in_samples[1] = NULL;
 				convert_and_write(ld, cp->sample_rate, av_get_default_channel_layout(cp->channels), cp->format, (const uint8_t **)&in_samples, readed / cp->frame_size);
+				snprintf(ld->in_codec_name, sizeof(ld->in_codec_name), "PCM");
 			}
 		}
 	}else
@@ -341,6 +344,13 @@ static int init_spdif(looper_data_t *ld){
 		return cleanup_spdif(ld, err);
 	}
 
+	snprintf(ld->in_codec_name, sizeof(ld->in_codec_name), "%s", avcodec_get_name(ld->in_spdif_ctx->streams[0]->codecpar->codec_id));
+	err = 0;
+	while(ld->in_codec_name[err] && err < 3){
+		ld->in_codec_name[err] = toupper(ld->in_codec_name[err]);
+		err++;
+	}
+
 	return 0;
 }
 
@@ -450,7 +460,7 @@ int main(int argc, char **argv){
 		}
 
 		if(!(err = decode_audio_frame(&ld, &frame)))
-			err = convert_and_write(&ld, frame->sample_rate, frame->channel_layout, frame->format, (const uint8_t**)frame->extended_data, frame->nb_samples);
+			convert_and_write(&ld, frame->sample_rate, frame->channel_layout, frame->format, (const uint8_t**)frame->extended_data, frame->nb_samples);
 		else
 			cleanup_spdif(&ld, err);
 
