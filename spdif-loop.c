@@ -110,7 +110,7 @@ static int convert_and_write(looper_data_t *ld, int in_sample_rate, int64_t in_c
 	|| in_ch_layout != ld->in_ch_layout
 	|| in_sample_rate != ld->in_sample_rate
 	|| in_sample_fmt != ld->in_sample_fmt)){
-		if(ld->verbose && ld->swr_ctx)
+		if(ld->swr_ctx)
 			av_log(ld->swr_ctx, AV_LOG_INFO, "resampler reinit: %d Hz, %d (%lld) ch, %s -> %d Hz, %d (%lld) ch, %s\n",
 				ld->in_sample_rate, av_get_channel_layout_nb_channels(ld->in_ch_layout), ld->in_ch_layout,
 				av_get_sample_fmt_name(ld->in_sample_fmt), in_sample_rate, av_get_channel_layout_nb_channels(in_ch_layout),
@@ -134,8 +134,7 @@ static int convert_and_write(looper_data_t *ld, int in_sample_rate, int64_t in_c
 			matrix[BACK_LEFT][FRONT_LEFT] = 0.7;
 			matrix[BACK_RIGHT][FRONT_RIGHT] = 0.7;
 			swr_set_matrix(ld->swr_ctx, (const double *)&matrix, NUM_NAMED_CHANNELS);
-			if(ld->verbose)
-				av_log(ld->swr_ctx, AV_LOG_INFO, "upmixing 2.0 > 5.1\n");
+			av_log(ld->swr_ctx, AV_LOG_INFO, "upmixing 2.0 > 5.1\n");
 		}
 
 		if((err = swr_init(ld->swr_ctx)) < 0){
@@ -208,8 +207,7 @@ static int alsa_reader(void *data, uint8_t *buf, int buf_size){
 				if(state == SPDIF_SYNCWORD){
 					cp = 0;
 					ld->in_pcm_mode = 0;
-					if(ld->verbose)
-						av_log(ld->in_alsa_ctx, AV_LOG_INFO, "SPDIF SYNC found, stop PCM loop\n");
+					av_log(ld->in_alsa_ctx, AV_LOG_INFO, "SPDIF SYNC found, stop PCM loop\n");
 					break;
 				}
 			}
@@ -351,19 +349,19 @@ int main(int argc, char **argv){
 	pthread_t thread_id;
 	pthread_attr_t thread_attr;
 	char *in_dev_name = "hw:Device";
-	char *out_dev_name = "hw:Device";
 	char *i2c_dev_name = "/dev/i2c-0";
 	int i2c_addr = 0x3c;
 	AVFrame *frame = NULL;
 	looper_data_t ld = {0};
 
+	ld.out_dev_name = "hw:Device";
 	for(int opt = 0; (opt = getopt(argc, argv, "i:o:b:a:vm")) != -1;){
 		switch (opt){
 		case 'i':
 			in_dev_name = optarg;
 			break;
 		case 'o':
-			out_dev_name = optarg;
+			ld.out_dev_name = optarg;
 			break;
 		case 'b':
 			i2c_dev_name = optarg;
@@ -392,26 +390,6 @@ int main(int argc, char **argv){
 	av_log_set_flags(av_log_get_flags()|AV_LOG_PRINT_LEVEL|AV_LOG_SKIP_REPEATED);
 	av_log_set_level(ld.verbose > 2 ? AV_LOG_TRACE : (ld.verbose > 1 ? AV_LOG_DEBUG : (ld.verbose ? AV_LOG_VERBOSE : AV_LOG_QUIET)));
 
-	//I2C
-	if((ld.i2c_fd = open(i2c_dev_name, O_RDWR)) < 0){
-		av_log(NULL, AV_LOG_ERROR, "open: %s | %m\n", i2c_dev_name);
-	}else if(ioctl(ld.i2c_fd, I2C_SLAVE, i2c_addr) < 0){
-		av_log(NULL, AV_LOG_ERROR, "ioctl: %s I2C_SLAVE 0x%02x | %m\n", i2c_dev_name, i2c_addr);
-		close(ld.i2c_fd);
-		ld.i2c_fd = -1;
-	}
-
-	//THREAD
-	if(pthread_attr_init(&thread_attr) || pthread_attr_setdetachstate(&thread_attr, PTHREAD_CREATE_DETACHED)){
-		av_log(NULL, AV_LOG_ERROR, "pthread_attr_init || pthread_attr_setdetachstate | %m\n");
-		return -1;
-	}
-
-	if(pthread_create(&thread_id, &thread_attr, control_thread, &ld)){
-		av_log(NULL, AV_LOG_ERROR, "pthread_create: control_thread | %m\n");
-		return -1;
-	}
-while(1);
 	//AV
 #ifndef FF_API_NEXT
 	av_register_all();
@@ -437,9 +415,29 @@ while(1);
 	}
 
 	//OUTPUT
-	if((err = init_output(&ld, out_dev_name, AV_SAMPLE_FMT_S16, 48000, 6, AV_CH_LAYOUT_5POINT1)) < 0){
+	if((err = init_output(&ld, ld.out_dev_name, AV_SAMPLE_FMT_S16, 48000, 6, AV_CH_LAYOUT_5POINT1)) < 0){
 		av_log(NULL, AV_LOG_ERROR, "cannot init output: %s\n", av_err2str(err));
 		return cleanup(&ld, err);
+	}
+
+	//I2C
+	if((ld.i2c_fd = open(i2c_dev_name, O_RDWR)) < 0){
+		av_log(NULL, AV_LOG_ERROR, "open: %s | %m\n", i2c_dev_name);
+	}else if(ioctl(ld.i2c_fd, I2C_SLAVE, i2c_addr) < 0){
+		av_log(NULL, AV_LOG_ERROR, "ioctl: %s I2C_SLAVE 0x%02x | %m\n", i2c_dev_name, i2c_addr);
+		close(ld.i2c_fd);
+		ld.i2c_fd = -1;
+	}
+
+	//THREAD
+	if(pthread_attr_init(&thread_attr) || pthread_attr_setdetachstate(&thread_attr, PTHREAD_CREATE_DETACHED)){
+		av_log(NULL, AV_LOG_ERROR, "pthread_attr_init || pthread_attr_setdetachstate | %m\n");
+		return -1;
+	}
+
+	if(pthread_create(&thread_id, &thread_attr, control_thread, &ld)){
+		av_log(NULL, AV_LOG_ERROR, "pthread_create: control_thread | %m\n");
+		return -1;
 	}
 
 	//LOOP

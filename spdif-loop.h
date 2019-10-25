@@ -42,7 +42,17 @@
 #define BTN_POLL_DELAY		10
 #define BTN_READ_DELAY		500
 #define BTN_HOLD_DELAY		1000
-#define BTN_REPEAT_DELAY	100
+#define BTN_REPEAT_DELAY	5
+
+//menu
+#define MENU_NONE		0
+#define MENU_INFO		1
+#define MENU_VOLUME		2
+#define MENU_SETTINGS	3
+#define MENU_POWEROFF	4
+#define MENU_LAST		5
+
+#define MENU_DISPLAY_TIMEOUT 10000
 
 typedef struct looper_data_s {
 	AVPacket in_pkt;
@@ -58,6 +68,7 @@ typedef struct looper_data_s {
 
 	SwrContext *swr_ctx;
 
+	char *out_dev_name;
 	AVFormatContext *out_ctx;
 	AVStream *out_stream;
 
